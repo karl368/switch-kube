@@ -1,6 +1,6 @@
 # ============================================
 # 极简 Kubernetes 集群切换工具 switch-kube.ps1
-# 新增：u=更新集群k3s地址；改用文本替换避免丢失insecure-skip-tls-verify配置
+# 修复u命令无法读取旧IP、字符串插值错误；纯文本替换保留tls忽略配置
 # 删减：清屏c、切换等待回车、自动备份配置
 # ============================================
 $KubeDir = Join-Path $HOME ".kube"
@@ -49,14 +49,19 @@ function Update-KubeServerUrl($filePath, $newIP) {
     try {
         # 读取原始文件内容
         $content = Get-Content $filePath -Raw -Encoding utf8
-        $oldIPMatch = $content -match 'server: https://([\d\.]+):6443'
-        $oldIP = if ($oldIPMatch) { $matches[1] } else { "未知" }
+        # 修正正则：匹配yaml标准2空格前缀 server 行
+        $pattern = '  server: https://([\d\.]+):6443'
+        $matchResult = [regex]::Match($content, $pattern)
+        $oldIP = if ($matchResult.Success) { $matchResult.Groups[1].Value } else { "未知" }
+
         $newServerLine = "  server: https://$newIP`:6443"
-        # 正则匹配替换所有server行，只替换IP部分
-        $newContent = $content -replace '  server: https://[\d\.]+:6443', $newServerLine
+        # 全局替换所有server行
+        $newContent = $content -replace $pattern, $newServerLine
         # 写回文件
         Set-Content -Path $filePath -Value $newContent -Encoding utf8
-        Write-Host "`n{oldIP} -> {newIP}: 服务地址已更新。" -ForegroundColor Yellow
+        # 修复字符串插值写法
+        Write-Host "`n$oldIP -> $newIP : 服务地址已更新。" -ForegroundColor Yellow
+        Start-Sleep -Milliseconds 1200
         return $true
     }
     catch {
@@ -73,16 +78,13 @@ while ($true) {
     Print-SplitLine "Cyan"
     Write-Host "【指令说明】数字=选择集群 | r=刷新列表 | u=更新集群地址 | q=退出" -ForegroundColor Gray
     Write-Host ""
-
     $hasMainConfig = Test-Path $ConfigFile
     $configs = Load-KubeConfigs
-
     if ($configs.Count -eq 0) {
         Write-Host "错误：未找到备用kube配置文件，命名格式必须为 config - 集群名" -ForegroundColor Red
         Read-Host "按回车继续"
         continue
     }
-
     # 获取主配置MD5哈希精准匹配当前集群
     $mainConfigHash = $null
     $currentTargetCfg = $null
@@ -97,7 +99,6 @@ while ($true) {
             }
         }
     }
-
     # 打印集群列表
     $currentIndex = -1
     for ($i = 0; $i -lt $configs.Count; $i++) {
@@ -105,7 +106,6 @@ while ($true) {
         $displayName = Get-ConfigDisplayName $cfg
         $lineText = "[$($i + 1)] $displayName"
         $isCurrent = $false
-
         if ($hasMainConfig) {
             $cfgHash = (Get-FileHash $cfg.FullName -Algorithm MD5).Hash
             if ($cfgHash -eq $mainConfigHash) {
@@ -114,7 +114,6 @@ while ($true) {
                 $lineText += "  (*当前集群)"
             }
         }
-
         if ($isCurrent) {
             Write-Host $lineText -ForegroundColor Green
         }
@@ -122,7 +121,6 @@ while ($true) {
             Write-Host $lineText
         }
     }
-
     Print-SplitLine "Gray"
     # 当前集群状态展示
     if ($hasMainConfig -and $currentIndex -ge 0) {
@@ -145,7 +143,6 @@ while ($true) {
         Write-Host "警告：不存在主配置文件 config，无法识别当前集群" -ForegroundColor DarkYellow
     }
     Print-SplitLine "Gray"
-
     $choice = Read-Host "请输入操作指令"
     switch ($choice.ToLower()) {
         "q" {
@@ -165,7 +162,6 @@ while ($true) {
                 Read-Host "按回车刷新列表"
                 continue
             }
-
             Write-Host "`n=== 更新k3s集群服务地址 ===" -ForegroundColor Cyan
             $newIp = Read-Host "请输入新的服务器IP（仅输入IP，无需https://端口）"
             # 简单IP格式校验
@@ -175,23 +171,20 @@ while ($true) {
                 continue
             }
             $newServerUrl = "https://$newIp`:6443"
-
             # 1. 修改主config文件
             $res1 = Update-KubeServerUrl $ConfigFile $newIp
             # 2. 同步修改备用配置文件
             $res2 = Update-KubeServerUrl $currentTargetCfg.FullName $newIp
-
-if ($res1 -and $res2) {
-    Print-SplitLine "Green"
-    Write-Host "✅ 集群地址更新成功！" -ForegroundColor Green
-    Write-Host "新服务地址：$newServerUrl"
-    Write-Host "已同步更新主配置与备用集群配置，保留所有原有证书/跳过tls配置"
-    Print-SplitLine "Green"
+            if ($res1 -and $res2) {
+                Print-SplitLine "Green"
+                Write-Host "✅ 集群地址更新成功！" -ForegroundColor Green
+                Write-Host "新服务地址：$newServerUrl"
+                Write-Host "已同步更新主配置与备用集群配置，保留所有原有证书/跳过tls配置"
+                Print-SplitLine "Green"
             }
             else {
                 Write-Host "`n❌ 更新地址失败，请检查文件权限或IP" -ForegroundColor Red
             }
-
             Write-Host "自动刷新集群列表..." -ForegroundColor Gray
             Start-Sleep -Milliseconds 800
             continue
@@ -223,14 +216,12 @@ if ($res1 -and $res2) {
                     continue
                 }
             }
-
             # 无效输入
             if ($null -eq $targetConfig) {
                 Write-Host "`n输入无效，未匹配到任何集群配置！" -ForegroundColor Red
                 Read-Host "按回车刷新列表"
                 continue
             }
-
             # 重复切换当前集群判断
             if ($hasMainConfig) {
                 $targetHash = (Get-FileHash $targetConfig.FullName -Algorithm MD5).Hash
@@ -240,7 +231,6 @@ if ($res1 -and $res2) {
                     continue
                 }
             }
-
             # 直接覆盖主配置，移除备份逻辑
             Copy-Item $targetConfig.FullName $ConfigFile -Force
             $newEnvName = Get-ConfigDisplayName $targetConfig
