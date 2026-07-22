@@ -1,6 +1,6 @@
 # ============================================
 # 极简 Kubernetes 集群切换工具 switch-kube.ps1
-# 删减：清屏c、切换等待回车、自动备份配置
+# 新增：u=更新集群k3s地址；删减：清屏c、切换等待回车、自动备份配置
 # ============================================
 $KubeDir = Join-Path $HOME ".kube"
 $ConfigFile = Join-Path $KubeDir "config"
@@ -49,7 +49,7 @@ while ($true) {
     Print-SplitLine "Cyan"
     Write-Host "           Kubernetes 集群快速切换工具" -ForegroundColor Cyan
     Print-SplitLine "Cyan"
-    Write-Host "【指令说明】数字=选择集群 | q=退出 | r=刷新列表" -ForegroundColor Gray
+    Write-Host "【指令说明】数字=选择集群 | r=刷新列表 | u=更新集群地址 | q=退出" -ForegroundColor Gray
     Write-Host ""
 
     $hasMainConfig = Test-Path $ConfigFile
@@ -63,8 +63,17 @@ while ($true) {
 
     # 获取主配置MD5哈希精准匹配当前集群
     $mainConfigHash = $null
+    $currentTargetCfg = $null
     if ($hasMainConfig) {
         $mainConfigHash = (Get-FileHash $ConfigFile -Algorithm MD5).Hash
+        # 找到当前生效对应的备用配置文件
+        foreach ($cfg in $configs) {
+            $h = (Get-FileHash $cfg.FullName -Algorithm MD5).Hash
+            if ($h -eq $mainConfigHash) {
+                $currentTargetCfg = $cfg
+                break
+            }
+        }
     }
 
     # 打印集群列表
@@ -122,6 +131,58 @@ while ($true) {
             exit 0
         }
         "r" { continue } # 刷新列表
+        "u" {
+            # 更新当前集群k3s地址逻辑
+            if (-not $hasMainConfig) {
+                Write-Host "`n错误：无主配置文件config，无法更新集群地址" -ForegroundColor Red
+                Read-Host "按回车刷新列表"
+                continue
+            }
+            if ($null -eq $currentTargetCfg) {
+                Write-Host "`n错误：未匹配到当前集群对应的备用配置，无法修改" -ForegroundColor Red
+                Read-Host "按回车刷新列表"
+                continue
+            }
+
+            $curCtxName = Get-KubeContext $ConfigFile
+            if ([string]::IsNullOrWhiteSpace($curCtxName)) {
+                Write-Host "`n错误：读取当前上下文失败" -ForegroundColor Red
+                Read-Host "按回车刷新列表"
+                continue
+            }
+
+            # 获取集群名称
+            $clusterName = kubectl config view --minify -o jsonpath='{.contexts[0].context.cluster}' 2>$null
+            if ([string]::IsNullOrWhiteSpace($clusterName)) {
+                Write-Host "`n错误：读取集群名称失败" -ForegroundColor Red
+                Read-Host "按回车刷新列表"
+                continue
+            }
+
+            Write-Host "`n=== 更新k3s集群服务地址 ===" -ForegroundColor Cyan
+            Write-Host "当前集群标识：$clusterName"
+            $newIp = Read-Host "请输入新的服务器IP（仅输入IP，无需https://端口）"
+            $newServerUrl = "https://$newIp`:6443"
+
+            # 先修改主config
+            kubectl config set-cluster $clusterName --server=$newServerUrl 2>$null
+            # 同步修改备用配置文件（当前集群源文件）
+            Copy-Item $ConfigFile $currentTargetCfg.FullName -Force
+
+            if ($LASTEXITCODE -eq 0) {
+                Print-SplitLine "Green"
+                Write-Host "✅ 集群地址更新成功！" -ForegroundColor Green
+                Write-Host "新服务地址：$newServerUrl"
+                Print-SplitLine "Green"
+            }
+            else {
+                Write-Host "`n❌ 更新地址失败，请检查IP是否合法" -ForegroundColor Red
+            }
+
+            Write-Host "自动刷新集群列表..." -ForegroundColor Gray
+            Start-Sleep -Milliseconds 800
+            continue
+        }
         default {
             $targetConfig = $null
             # 数字选择
@@ -170,7 +231,6 @@ while ($true) {
             # 直接覆盖主配置，移除备份逻辑
             Copy-Item $targetConfig.FullName $ConfigFile -Force
             $newEnvName = Get-ConfigDisplayName $targetConfig
-
             # 切换成功提示，自动刷新列表无等待回车
             Print-SplitLine "Green"
             Write-Host "✅ 集群切换完成！" -ForegroundColor Green
