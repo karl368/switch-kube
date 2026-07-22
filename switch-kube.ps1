@@ -49,11 +49,14 @@ function Update-KubeServerUrl($filePath, $newIP) {
     try {
         # 读取原始文件内容
         $content = Get-Content $filePath -Raw -Encoding utf8
+        $oldIPMatch = $content -match 'server: https://([\d\.]+):6443'
+        $oldIP = if ($oldIPMatch) { $matches[1] } else { "未知" }
         $newServerLine = "  server: https://$newIP`:6443"
         # 正则匹配替换所有server行，只替换IP部分
         $newContent = $content -replace '  server: https://[\d\.]+:6443', $newServerLine
         # 写回文件
         Set-Content -Path $filePath -Value $newContent -Encoding utf8
+        Write-Host "`n{oldIP} -> {newIP}: 服务地址已更新。" -ForegroundColor Yellow
         return $true
     }
     catch {
@@ -178,12 +181,12 @@ while ($true) {
             # 2. 同步修改备用配置文件
             $res2 = Update-KubeServerUrl $currentTargetCfg.FullName $newIp
 
-            if ($res1 -and $res2) {
-                Print-SplitLine "Green"
-                Write-Host "✅ 集群地址更新成功！" -ForegroundColor Green
-                Write-Host "新服务地址：$newServerUrl"
-                Write-Host "已同步更新主配置与备用集群配置，保留所有原有证书/跳过tls配置"
-                Print-SplitLine "Green"
+if ($res1 -and $res2) {
+    Print-SplitLine "Green"
+    Write-Host "✅ 集群地址更新成功！" -ForegroundColor Green
+    Write-Host "新服务地址：$newServerUrl"
+    Write-Host "已同步更新主配置与备用集群配置，保留所有原有证书/跳过tls配置"
+    Print-SplitLine "Green"
             }
             else {
                 Write-Host "`n❌ 更新地址失败，请检查文件权限或IP" -ForegroundColor Red
