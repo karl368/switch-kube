@@ -1,6 +1,7 @@
 # ============================================
 # 极简 Kubernetes 集群切换工具 switch-kube.ps1
-# 新增：u=更新集群k3s地址；删减：清屏c、切换等待回车、自动备份配置
+# 新增：u=更新集群k3s地址；改用文本替换避免丢失insecure-skip-tls-verify配置
+# 删减：清屏c、切换等待回车、自动备份配置
 # ============================================
 $KubeDir = Join-Path $HOME ".kube"
 $ConfigFile = Join-Path $KubeDir "config"
@@ -41,6 +42,24 @@ function Load-KubeConfigs() {
         }
     }
     return $configList | Sort-Object Name
+}
+
+# 文本替换更新server地址（纯文本操作，保留其他配置）
+function Update-KubeServerUrl($filePath, $newIP) {
+    try {
+        # 读取原始文件内容
+        $content = Get-Content $filePath -Raw -Encoding utf8
+        $newServerLine = "  server: https://$newIP`:6443"
+        # 正则匹配替换所有server行，只替换IP部分
+        $newContent = $content -replace '  server: https://[\d\.]+:6443', $newServerLine
+        # 写回文件
+        Set-Content -Path $filePath -Value $newContent -Encoding utf8
+        return $true
+    }
+    catch {
+        Write-Host "文件修改失败：$($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
 }
 
 # 主循环菜单
@@ -144,39 +163,30 @@ while ($true) {
                 continue
             }
 
-            $curCtxName = Get-KubeContext $ConfigFile
-            if ([string]::IsNullOrWhiteSpace($curCtxName)) {
-                Write-Host "`n错误：读取当前上下文失败" -ForegroundColor Red
-                Read-Host "按回车刷新列表"
-                continue
-            }
-
-            # 获取集群名称
-            $clusterName = kubectl config view --minify -o jsonpath='{.contexts[0].context.cluster}' 2>$null
-            if ([string]::IsNullOrWhiteSpace($clusterName)) {
-                Write-Host "`n错误：读取集群名称失败" -ForegroundColor Red
-                Read-Host "按回车刷新列表"
-                continue
-            }
-
             Write-Host "`n=== 更新k3s集群服务地址 ===" -ForegroundColor Cyan
-            Write-Host "当前集群标识：$clusterName"
             $newIp = Read-Host "请输入新的服务器IP（仅输入IP，无需https://端口）"
+            # 简单IP格式校验
+            if (-not ($newIp -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')) {
+                Write-Host "`n❌ IP格式不正确，请输入纯数字IP，例：192.168.1.100" -ForegroundColor Red
+                Read-Host "按回车刷新列表"
+                continue
+            }
             $newServerUrl = "https://$newIp`:6443"
 
-            # 先修改主config
-            kubectl config set-cluster $clusterName --server=$newServerUrl 2>$null
-            # 同步修改备用配置文件（当前集群源文件）
-            Copy-Item $ConfigFile $currentTargetCfg.FullName -Force
+            # 1. 修改主config文件
+            $res1 = Update-KubeServerUrl $ConfigFile $newIp
+            # 2. 同步修改备用配置文件
+            $res2 = Update-KubeServerUrl $currentTargetCfg.FullName $newIp
 
-            if ($LASTEXITCODE -eq 0) {
+            if ($res1 -and $res2) {
                 Print-SplitLine "Green"
                 Write-Host "✅ 集群地址更新成功！" -ForegroundColor Green
                 Write-Host "新服务地址：$newServerUrl"
+                Write-Host "已同步更新主配置与备用集群配置，保留所有原有证书/跳过tls配置"
                 Print-SplitLine "Green"
             }
             else {
-                Write-Host "`n❌ 更新地址失败，请检查IP是否合法" -ForegroundColor Red
+                Write-Host "`n❌ 更新地址失败，请检查文件权限或IP" -ForegroundColor Red
             }
 
             Write-Host "自动刷新集群列表..." -ForegroundColor Gray
